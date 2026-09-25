@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — Dunex</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="logo">D</div><span>Dunex</span></div>
+    <nav class="nav">
+      <a href="index.html" class="active"><span class="dot"></span> Dashboard</a>
+      <a href="live.html"><span class="dot"></span> Live Monitoring</a>
+    </nav>
+    <div class="hint">Rekap harian dari data trip. Muat CSV di panel kanan untuk data terbaru.</div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Rekap Trip</h1>
+        <div class="sub" id="rangeLabel">Ringkasan seluruh data yang dimuat</div>
+      </div>
+      <div class="topbar-right">
+        <div class="iconbtn">🔔</div>
+        <div class="avatar"></div>
+      </div>
+    </div>
+
+    <div class="grid g-2-1">
+      <div>
+        <div class="card">
+          <h3>Total Trip</h3>
+          <div class="muted">Dari seluruh tanggal yang dimuat</div>
+          <div class="big-number" id="totalTrip">0</div>
+          <canvas id="trendChart" height="90"></canvas>
+        </div>
+
+        <div class="grid g-4" style="margin-top:16px">
+          <div class="stat-card sc-pink"><div class="icon">✅</div><div class="label">On Time</div><div class="value" id="statOnTime">0</div></div>
+          <div class="stat-card sc-purple"><div class="icon">🕒</div><div class="label">Waiting</div><div class="value" id="statWaiting">0</div></div>
+          <div class="stat-card sc-blue"><div class="icon">🚚</div><div class="label">Sudah Berangkat</div><div class="value" id="statDeparted">0</div></div>
+          <div class="stat-card sc-orange"><div class="icon">⚠️</div><div class="label">Delay</div><div class="value" id="statDelay">0</div></div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="controls">
+            <input type="text" id="search" placeholder="Cari No Trip / Destinasi…">
+            <input type="date" id="dateFilter">
+            <select id="statusFilter">
+              <option value="">Semua Status</option>
+              <option value="On Time">On Time</option>
+              <option value="Waiting">Waiting</option>
+              <option value="Delay">Delay</option>
+              <option value="Sudah Berangkat">Sudah Berangkat</option>
+            </select>
+            <button class="btn secondary" id="clearBtn">Reset Filter</button>
+            <span class="pill" id="countPill"></span>
+          </div>
+          <table>
+            <thead><tr><th>Tanggal</th><th>No Trip</th><th>Destinasi</th><th>Actual Standby</th><th>ETD</th><th>Actual Depart</th><th>Status</th></tr></thead>
+            <tbody id="tbody"><tr><td colspan="7" class="muted" style="padding:20px">Belum ada data — muat CSV di panel kanan.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Distribusi Status</h3>
+          <div class="muted">Perbandingan status seluruh trip</div>
+          <canvas id="statusDonut" height="200"></canvas>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <h3>Sumber Data</h3>
+          <div class="muted" style="margin-bottom:10px">Kolom yang dibaca: Tanggal (opsional), ID TRIP, Destination, Actual Standby, ETD, ATD, Delay Status.</div>
+          <div class="upload-box" id="dropZone">
+            Tarik file CSV ke sini, atau
+            <label class="btn" style="display:inline-block;margin-top:8px;cursor:pointer">
+              Pilih File CSV<input type="file" id="fileInput" accept=".csv" style="display:none">
+            </label>
+          </div>
+          <div class="footer-note">
+            Sumber asli (Lark) memerlukan login, jadi tidak bisa ditarik otomatis dari halaman statis ini.
+            Cara pakai: setiap hari, buka tab tanggal di Lark → Export/Download as CSV → upload di sini.
+            Kalau datanya dipindah ke Google Sheet yang di-publish "Anyone with link", ganti <code>RECAP_CSV_URL</code>
+            di bagian bawah file ini supaya bisa ditarik otomatis juga.
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="assets/app.js"></script>
+<script>
+/* Ganti URL ini jika sumber rekap sudah dipublish sebagai CSV publik (opsional). */
+const RECAP_CSV_URL = "";
+
+const SAMPLE_CSV = `Tanggal,ID TRIP,Destination,Actual Standby,ETD,ATD,Delay Status
+24/09/2026,2609240667392,Kosambi Sorting Center,24/09/2026 06:59,24/09/2026 07:00,24/09/2026 07:05,ON TIME
+24/09/2026,2609240667393,GTL Cikupa Hub,24/09/2026 08:12,24/09/2026 08:00,-,BELUM BERANGKAT (DELAY)
+24/09/2026,2609240667406,GTL Neglasari Hub,24/09/2026 09:40,24/09/2026 10:00,24/09/2026 09:58,ON TIME
+25/09/2026,2609250667407,Bandung Sorting Center,25/09/2026 05:50,25/09/2026 06:00,-,WAITING
+25/09/2026,2609250667408,GTL Balaraja Hub,25/09/2026 07:20,25/09/2026 07:30,25/09/2026 07:33,ON TIME
+25/09/2026,2609250667409,GTL Pakuhaji Hub,25/09/2026 08:55,25/09/2026 09:00,-,WAITING`;
+
+let trips = [];
+let trendChart, donutChart;
+
+function normalize(objs) {
+  return objs.map(o => {
+    const etd = parseIDDateTime(o["ETD"]);
+    const standby = parseIDDateTime(o["Actual Standby"]);
+    const atd = parseIDDateTime(o["ATD"]);
+    const departed = !!atd;
+    const badge = statusBadge(o["Delay Status"], departed);
+    const dateStr = (o["Tanggal"] && o["Tanggal"].trim()) || (etd ? isoDate(etd) : "");
+    return { date: dateStr, id: o["ID TRIP"] || "", destination: o["Destination"] || "", standby, etd, atd, departed, badge };
+  }).filter(r => r.id);
+}
+
+function loadFromCSVText(text) {
+  trips = normalize(csvToObjects(parseCSV(text)));
+  render();
+}
+
+async function loadFromURL(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  loadFromCSVText(await res.text());
+}
+
+function currentFilters() {
+  return {
+    q: document.getElementById("search").value.trim().toLowerCase(),
+    date: document.getElementById("dateFilter").value,
+    status: document.getElementById("statusFilter").value,
+  };
+}
+
+function render() {
+  const { q, date, status } = currentFilters();
+  let rows = trips.filter(r => {
+    if (q && !(r.id.toLowerCase().includes(q) || r.destination.toLowerCase().includes(q))) return false;
+    if (date && r.date !== date) return false;
+    if (status && r.badge.label !== status) return false;
+    return true;
+  });
+
+  document.getElementById("totalTrip").textContent = trips.length;
+  document.getElementById("countPill").textContent = `${rows.length} trip ditampilkan`;
+
+  const counts = { "On Time": 0, "Waiting": 0, "Delay": 0, "Sudah Berangkat": 0 };
+  trips.forEach(r => { if (counts[r.badge.label] !== undefined) counts[r.badge.label]++; });
+  document.getElementById("statOnTime").textContent = counts["On Time"];
+  document.getElementById("statWaiting").textContent = counts["Waiting"];
+  document.getElementById("statDelay").textContent = counts["Delay"];
+  document.getElementById("statDeparted").textContent = counts["Sudah Berangkat"];
+
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = rows.length ? rows.map(r => `<tr>
+      <td>${r.date || "-"}</td><td>${r.id}</td><td>${r.destination}</td>
+      <td>${fmtTime(r.standby)}</td><td>${fmtTime(r.etd)}</td><td>${fmtTime(r.atd)}</td>
+      <td><span class="badge ${r.badge.cls}">${r.badge.label}</span></td>
+    </tr>`).join("")
+    : `<tr><td colspan="7" class="muted" style="padding:20px">Tidak ada data yang cocok dengan filter.</td></tr>`;
+
+  renderCharts();
+}
+
+function renderCharts() {
+  const byDate = {};
+  trips.forEach(r => { if (r.date) byDate[r.date] = (byDate[r.date] || 0) + 1; });
+  const dates = Object.keys(byDate).sort();
+
+  const trendCtx = document.getElementById("trendChart");
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(trendCtx, {
+    type: "line",
+    data: { labels: dates, datasets: [{ label: "Trip per hari", data: dates.map(d => byDate[d]),
+      borderColor: "#ec4899", backgroundColor: "rgba(236,72,153,.12)", fill: true, tension: .35, pointRadius: 3 }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+
+  const counts = { "On Time": 0, "Waiting": 0, "Delay": 0, "Sudah Berangkat": 0 };
+  trips.forEach(r => { if (counts[r.badge.label] !== undefined) counts[r.badge.label]++; });
+  const donutCtx = document.getElementById("statusDonut");
+  if (donutChart) donutChart.destroy();
+  donutChart = new Chart(donutCtx, {
+    type: "doughnut",
+    data: { labels: Object.keys(counts), datasets: [{ data: Object.values(counts),
+      backgroundColor: ["#10b981", "#f59e0b", "#ef4444", "#8b5cf6"], borderWidth: 0 }] },
+    options: { plugins: { legend: { position: "bottom", labels: { boxWidth: 10, font: { size: 11 } } } }, cutout: "68%" }
+  });
+}
+
+document.getElementById("fileInput").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadFromCSVText(ev.target.result);
+  reader.readAsText(f);
+});
+["search", "dateFilter", "statusFilter"].forEach(id =>
+  document.getElementById(id).addEventListener("input", render));
+document.getElementById("clearBtn").addEventListener("click", () => {
+  document.getElementById("search").value = "";
+  document.getElementById("dateFilter").value = "";
+  document.getElementById("statusFilter").value = "";
+  render();
+});
+
+(async function init() {
+  if (RECAP_CSV_URL) { try { await loadFromURL(RECAP_CSV_URL); return; } catch (e) { /* fall through to sample */ } }
+  loadFromCSVText(SAMPLE_CSV);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Monitoring — Dunex</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="logo">D</div><span>Dunex</span></div>
+    <nav class="nav">
+      <a href="index.html"><span class="dot"></span> Dashboard</a>
+      <a href="live.html" class="active"><span class="dot"></span> Live Monitoring</a>
+    </nav>
+    <div class="hint">Sumber data: tab <b>Summary Outbound</b>, auto-refresh tiap <span id="hintSec"></span> detik.</div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Live Monitoring — Outbound</h1>
+        <div class="sub">Destinasi · Actual Standby · ETD · Actual Depart · No Trip</div>
+      </div>
+      <div class="topbar-right">
+        <div class="pill"><span class="pulse"></span> <span id="lastUpdated">memuat…</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="controls">
+        <input type="text" id="search" placeholder="Cari No Trip / Destinasi…">
+        <input type="date" id="dateFilter">
+        <select id="statusFilter">
+          <option value="">Semua Status</option>
+          <option value="On Time">On Time</option>
+          <option value="Waiting">Waiting</option>
+          <option value="Delay">Delay</option>
+          <option value="Sudah Berangkat">Sudah Berangkat</option>
+        </select>
+        <button class="btn secondary" id="clearBtn">Reset Filter</button>
+        <button class="btn" id="refreshBtn">Refresh Sekarang</button>
+        <span class="pill" id="countPill"></span>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>No Trip</th><th>Destinasi</th><th>Actual Standby</th><th>ETD</th><th>Actual Depart</th><th>Status</th><th>Countdown</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"><tr><td colspan="7" class="muted" style="padding:20px">Memuat data…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="footer-note">
+      Popup peringatan otomatis muncul 10 menit sebelum jam ETD untuk trip yang belum berangkat, tampil 5 detik lalu hilang sendiri.
+      Data diambil langsung dari Google Sheets (harus berstatus "Anyone with link – Viewer").
+    </div>
+  </main>
+</div>
+
+<div class="alert-overlay" id="alertOverlay">
+  <div class="alert-box">
+    <div id="alertIcon"></div>
+    <div class="eyebrow">SEGERA BERANGKAT</div>
+    <h2 id="alertTrip">Trip #—</h2>
+    <div class="dest" id="alertDest">—</div>
+    <div class="meta">ETD <span id="alertETD">—</span> · Actual Standby <span id="alertStandby">—</span></div>
+    <div class="countdown" id="alertCountdown">— menit lagi</div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+<script src="assets/pixel-art.js"></script>
+<script>
+document.getElementById("hintSec").textContent = CONFIG.REFRESH_SECONDS;
+
+let rawTrips = [];         // normalized rows
+let alertedAt = {};        // { tripId: timestampMs } cooldown tracker
+let alertQueue = [];
+let alertShowing = false;
+
+function normalizeRows(objs) {
+  return objs.map(o => {
+    const standby = parseIDDateTime(o["Actual Standby"]);
+    const etd = parseIDDateTime(o["ETD"]);
+    const atd = parseIDDateTime(o["ATD"]);
+    const departed = !!atd;
+    const badge = statusBadge(o["Delay Status"], departed);
+    return {
+      id: o["ID TRIP"] || "",
+      destination: o["Destination"] || "",
+      standby, etd, atd, departed,
+      delayStatus: o["Delay Status"] || "",
+      badge,
+    };
+  }).filter(r => r.id);
+}
+
+async function loadData() {
+  try {
+    const objs = await fetchSheetCSV(CONFIG.SHEET_ID, CONFIG.SHEET_GID);
+    rawTrips = normalizeRows(objs);
+    document.getElementById("lastUpdated").textContent =
+      "Update terakhir " + new Date().toLocaleTimeString("id-ID");
+    render();
+    checkAlerts();
+  } catch (e) {
+    document.getElementById("lastUpdated").textContent = "Gagal memuat data (" + e.message + ")";
+  }
+}
+
+function currentFilters() {
+  return {
+    q: document.getElementById("search").value.trim().toLowerCase(),
+    date: document.getElementById("dateFilter").value,
+    status: document.getElementById("statusFilter").value,
+  };
+}
+
+function render() {
+  const { q, date, status } = currentFilters();
+  const now = new Date();
+  let rows = rawTrips.filter(r => {
+    if (q && !(r.id.toLowerCase().includes(q) || r.destination.toLowerCase().includes(q))) return false;
+    if (date && r.etd && isoDate(r.etd) !== date) return false;
+    if (status && r.badge.label !== status) return false;
+    return true;
+  });
+  rows.sort((a, b) => (a.etd?.getTime() || Infinity) - (b.etd?.getTime() || Infinity));
+
+  const tbody = document.getElementById("tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted" style="padding:20px">Tidak ada data yang cocok dengan filter.</td></tr>`;
+  } else {
+    tbody.innerHTML = rows.map(r => {
+      let countdown = "-";
+      if (!r.departed && r.etd) {
+        const diffMin = Math.round((r.etd - now) / 60000);
+        countdown = diffMin >= 0 ? `${diffMin} menit lagi` : `Terlambat ${Math.abs(diffMin)} menit`;
+      } else if (r.departed) {
+        countdown = "Berangkat";
+      }
+      return `<tr>
+        <td>${r.id}</td>
+        <td>${r.destination}</td>
+        <td>${fmtTime(r.standby)}</td>
+        <td>${fmtTime(r.etd)}</td>
+        <td>${fmtTime(r.atd)}</td>
+        <td><span class="badge ${r.badge.cls}">${r.badge.label}</span></td>
+        <td>${countdown}</td>
+      </tr>`;
+    }).join("");
+  }
+  document.getElementById("countPill").textContent = `${rows.length} trip ditampilkan`;
+}
+
+function checkAlerts() {
+  const now = new Date();
+  rawTrips.forEach(r => {
+    if (r.departed || !r.etd) return;
+    const diffMin = (r.etd - now) / 60000;
+    if (diffMin > 0 && diffMin <= CONFIG.ETD_ALERT_MINUTES) {
+      const last = alertedAt[r.id] || 0;
+      if (now.getTime() - last >= CONFIG.ALERT_COOLDOWN_MIN * 60000) {
+        alertedAt[r.id] = now.getTime();
+        alertQueue.push(r);
+      }
+    }
+  });
+  processAlertQueue();
+}
+
+function processAlertQueue() {
+  if (alertShowing || !alertQueue.length) return;
+  alertShowing = true;
+  const r = alertQueue.shift();
+  const diffMin = Math.max(0, Math.round((r.etd - new Date()) / 60000));
+  document.getElementById("alertIcon").innerHTML = pixelIconFor(r.destination, 12);
+  document.getElementById("alertTrip").textContent = "Trip #" + r.id;
+  document.getElementById("alertDest").textContent = r.destination;
+  document.getElementById("alertETD").textContent = fmtTime(r.etd);
+  document.getElementById("alertStandby").textContent = fmtTime(r.standby);
+  document.getElementById("alertCountdown").textContent = diffMin + " menit lagi";
+  const overlay = document.getElementById("alertOverlay");
+  overlay.classList.add("show");
+  setTimeout(() => {
+    overlay.classList.remove("show");
+    alertShowing = false;
+    setTimeout(processAlertQueue, 400);
+  }, CONFIG.ALERT_DURATION_MS);
+}
+
+["search", "dateFilter", "statusFilter"].forEach(id =>
+  document.getElementById(id).addEventListener("input", render));
+document.getElementById("clearBtn").addEventListener("click", () => {
+  document.getElementById("search").value = "";
+  document.getElementById("dateFilter").value = "";
+  document.getElementById("statusFilter").value = "";
+  render();
+});
+document.getElementById("refreshBtn").addEventListener("click", loadData);
+
+loadData();
+setInterval(loadData, CONFIG.REFRESH_SECONDS * 1000);
+setInterval(render, 30000); // keep countdown column fresh between fetches
+</script>
+</body>
+</html>
